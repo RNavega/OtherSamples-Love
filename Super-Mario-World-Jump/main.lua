@@ -18,7 +18,10 @@ local FLOOR_Y = 500
 local SHORT_JUMP_TILES = 3
 -- How many tiles high that a LONG jump should reach.
 local LONG_JUMP_TILES = 5
+-- Distance before which any jump key releases will cause a short jump.
 local TOLERANCE_MIN_HEIGHT = TILE_HEIGHT * 1.8
+-- Distance after which the player starts decelerating and will reach
+-- a long jump height.
 local TOLERANCE_MAX_HEIGHT = SHORT_JUMP_TILES * TILE_HEIGHT
 
 -- Initial jump speed, in pixels per second.
@@ -44,7 +47,7 @@ local jumpImpulseEffect, fallEffect, steerEffect
 jumpImpulseEffect = {
     active = false,
     s=0.0, u=nil, a=nil, t=0.0,
-    useGravity=false, aT=0.0,
+    decelerate=false, aT=0.0,
     -- Debug fields..
     maxS=0.0,
     startKey=nil,
@@ -57,7 +60,7 @@ function jumpImpulseEffect:start(startKey)
     ji.s = 0.0
     ji.u = INITIAL_SPEED
     ji.a = nil
-    ji.useGravity = false
+    ji.decelerate = false
     ji.t = 0.0
     ji.aT = 0.0
     -- Debug fields.
@@ -66,14 +69,16 @@ function jumpImpulseEffect:start(startKey)
     ji.holdDistance = 0.0
 end
 
-function jumpImpulseEffect:startGravity()
-    if self.useGravity then
+function jumpImpulseEffect:startDecelerating()
+    if self.decelerate then
         return
+    else
+        self.decelerate = true
     end
     -- Record the current 'time' of the jump, so the
     -- acceleration time can start from zero from now on.
-    self.aT = 0.0--self.t
-    self.useGravity = true
+    self.aT = 0.0
+
     -- Desired distance in pixels that the player should always reach when jumping up.
     local desiredDistance
     -- Change this 'extraPixels' value to +3 or something like that so it's added
@@ -97,7 +102,6 @@ function jumpImpulseEffect:startGravity()
         -- force the player to reach a "short jump" height.
         desiredDistance = SHORT_JUMP_TILES * TILE_HEIGHT - self.s + extraPixels
     end
-
     -- Solving for (a) to find the acceleration that'll make the player hit that
     -- desired jump height as the maximum, with (v²) being 0.0 as that's the speed
     -- at the highest point of the jump, after which the player starts falling.
@@ -120,18 +124,17 @@ function jumpImpulseEffect:update(dt)
     -- s = (u * t) + (1/2 * a * t²)
     -- s = uniform_distance + accelerated_distance
     --
-    -- However, we only use the initial distance first (constant speed along time).
-    -- The gravity only kicks in when the player has made it clear that they want
-    -- to do a long jump by holding the jump key long enough.
+    -- The gravity only kicks in when the player has either released the jump key,
+    -- or has traveled far enough that they made it clear that they want to do a
+    -- long jump (uniformDistance is above a threshold).
     --
-    -- Once the jump reaches its highest point (the derivative of fixed_speed_distance
-    -- becomes less than the derivative of accelerated_distance, meaning, the velocity
-    -- at the player is zero and from this point on the player will start falling),
-    -- we change to a different gravity.
+    -- Once the jump reaches its highest point the velocity of the jump becomes
+    -- zero, as it's about to change sign and become negative. From this point
+    -- on the player will start falling.
     self.t = self.t + dt
     local uniformDistance = self.u * self.t
 
-    if self.useGravity then
+    if self.decelerate then
         self.aT = self.aT + dt
         local accelDistance = 0.5 * self.a * (self.aT * self.aT)
         self.s = uniformDistance + accelDistance
@@ -144,8 +147,11 @@ function jumpImpulseEffect:update(dt)
     else
         self.s = uniformDistance
         self.holdDistance = uniformDistance
+        -- If the player has jumped above a threshold, force a long jump.
+        -- Note that you could also use "time in seconds" as the threshold,
+        -- in this way: if self.t >= TIME_LIMIT then (...).
         if self.s >= TOLERANCE_MAX_HEIGHT then
-            self:startGravity()
+            self:startDecelerating()
         end
     end
     self.maxS = self.s > self.maxS and self.s or self.maxS
@@ -169,11 +175,11 @@ end
 function fallEffect:update(dt)
     self.t = self.t + dt
     self.aT = self.aT + dt
-    -- Using "Euler integration", which is less precise than using a
+    -- Using "Euler's method", which is less precise than using a
     -- kinematic equation, but it works perfectly for a falling effect.
     self.v = self.v + self.a * dt
     -- A top-cap on the falling speed, in pixels per second.
-    -- Subjective value, use what feels right.
+    -- Subjective value, using what feels right.
     -- Try setting a small value like (TILE_HEIGHT * 5) to see it more clearly.
     local SPEED_LIMIT = TILE_HEIGHT * 300.0
     if self.v > SPEED_LIMIT then
@@ -182,6 +188,7 @@ function fallEffect:update(dt)
     self.s = self.s - self.v * dt
     -- For the purposes of this example, consider the character on ground
     -- when the jump offset goes below zero (goes back to the ground).
+    --
     -- In an actual game, in love.update() you'd check for collisions and
     -- disable this falling effect when the character lands on solid ground.
     if self.s < 0.0 then
@@ -271,14 +278,14 @@ function love.draw()
 
     -- Draw the player.
     love.graphics.setColor(0.0, 0.8, 0.0)
-    local effect = ji.active and ji or fallEffect
-    love.graphics.rectangle('fill', playerPosition[1], playerPosition[2] - effect.s,
+    local activeEffect = ji.active and ji or fallEffect
+    love.graphics.rectangle('fill', playerPosition[1], playerPosition[2] - activeEffect.s,
                             TILE_HEIGHT, PLAYER_HEIGHT)
 
     love.graphics.setColor(1.0, 1.0, 1.0)
-    love.graphics.print(('Offset: %.03f'):format(effect.s), 10, 10)
-    love.graphics.print('On Ground: ' .. tostring(not (ji.active or fallEffect.active)), 10, 30)
-    love.graphics.print(('Stopwatch: %.03fs'):format(effect.t), 10, 50)
+    love.graphics.print(('Offset: %.03f'):format(activeEffect.s), 10, 10)
+    love.graphics.print('On Ground: ' .. tostring(not activeEffect.active), 10, 30)
+    love.graphics.print(('Stopwatch: %.03fs'):format(activeEffect.t), 10, 50)
     love.graphics.print('Press Tab to toggle the debug drawings ('
                         .. (drawDebug and 'ON' or 'OFF') .. ')',
                         10, 70)
@@ -310,6 +317,6 @@ function love.keyreleased(key)
     elseif key == 'left' then
         relevantKeys['left'] = false
     elseif jumpImpulseEffect.active and jumpImpulseEffect.startKey == key then
-        jumpImpulseEffect:startGravity()
+        jumpImpulseEffect:startDecelerating()
     end
 end
